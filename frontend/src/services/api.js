@@ -9,21 +9,55 @@ const api = axios.create({
   headers: { 'Content-Type': 'application/json' },
 })
 
-export const clientsApi = {
-  list: () => api.get('/api/clients'),
-  create: (data) => api.post('/api/clients', data),
+// Attach JWT token from localStorage to every request automatically
+api.interceptors.request.use(config => {
+  const token = localStorage.getItem('adminflow_token')
+  if (token) {
+    config.headers['Authorization'] = `Bearer ${token}`
+  }
+  return config
+})
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+export const authAPI = {
+  login:    (email, password)        => api.post('/api/auth/login',    { email, password }),
+  register: (name, email, password)  => api.post('/api/auth/register', { name, email, password }),
+  me:       ()                       => api.get('/api/auth/me'),
 }
 
-export const scheduleApi = {
+// ── Clients ───────────────────────────────────────────────────────────────────
+export const clientsAPI = {
+  list:   ()         => api.get('/api/clients'),
+  create: (data)     => api.post('/api/clients', data),
+  update: (id, data) => api.put(`/api/clients/${id}`, data),
+  delete: (id)       => api.delete(`/api/clients/${id}`),
+}
+
+// ── Invoices ──────────────────────────────────────────────────────────────────
+export const invoicesAPI = {
+  list:       ()         => api.get('/api/invoices'),
+  create:     (data)     => api.post('/api/invoices', data),
+  update:     (id, data) => api.put(`/api/invoices/${id}`, data),
+  delete:     (id)       => api.delete(`/api/invoices/${id}`),
+  getPayLink: (id)       => api.post(`/api/invoices/${id}/pay-link`),
+  remind:     (id)       => api.post(`/api/invoices/${id}/remind`),
+}
+
+// ── Schedule ──────────────────────────────────────────────────────────────────
+export const scheduleAPI = {
+  list:   ()     => api.get('/api/schedule'),
   create: (data) => api.post('/api/schedule', data),
+  delete: (id)   => api.delete(`/api/schedule/${id}`),
 }
 
-export const invoicesApi = {
-  create: (data) => api.post('/api/invoices', data),
-}
-
+// ── Beta signup (landing page) ────────────────────────────────────────────────
 export const betaApi = {
   signup: (data) => api.post('/api/beta-signup', data),
 }
+
+// Legacy named exports kept for backwards compat with existing pages
+export const clientsApi = clientsAPI
+export const scheduleApi = scheduleAPI
+export const invoicesApi = invoicesAPI
 
 export default api

@@ -3,3 +3,8 @@ uvicorn[standard]==0.29.0
 pydantic==2.7.1
 python-multipart==0.0.9
 psycopg2-binary>=2.9
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+resend>=0.7.0
+stripe>=7.0.0
+reportlab>=4.0.0

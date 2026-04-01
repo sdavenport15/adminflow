@@ -1,14 +1,6 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import Layout from '../components/Layout'
-
-const SEED_INVOICES = [
-  { id: 1042, client: 'Meridian Consulting', amount: 2400, status: 'Paid',    date: 'Mar 28, 2025', due: 'Apr 11, 2025' },
-  { id: 1043, client: 'Apex Partners',       amount: 3200, status: 'Pending', date: 'Apr 1, 2025',  due: 'Apr 15, 2025' },
-  { id: 1044, client: 'Sarah Chen',          amount: 1800, status: 'Pending', date: 'Apr 1, 2025',  due: 'Apr 15, 2025' },
-  { id: 1041, client: 'DataBridge LLC',      amount: 950,  status: 'Overdue', date: 'Mar 10, 2025', due: 'Mar 24, 2025' },
-]
-
-const CLIENTS = ['Meridian Consulting', 'Apex Partners', 'DataBridge LLC', 'Sarah Chen']
+import { invoicesAPI, clientsAPI } from '../services/api'
 
 function statusBadge(status) {
   if (status === 'Paid')    return <span className="badge badge-green">Paid</span>
@@ -18,24 +10,57 @@ function statusBadge(status) {
 }
 
 function fmtMoney(n) {
-  return '$' + n.toLocaleString('en-US')
+  return '$' + Number(n).toLocaleString('en-US')
 }
 
 export default function Invoices() {
-  const [invoices, setInvoices] = useState(SEED_INVOICES)
-  const [filter, setFilter] = useState('All')
+  const [invoices,  setInvoices]  = useState([])
+  const [clients,   setClients]   = useState([])
+  const [loading,   setLoading]   = useState(true)
+  const [filter,    setFilter]    = useState('All')
   const [showModal, setShowModal] = useState(false)
-  const [form, setForm] = useState({ client: '', amount: '', notes: '' })
-  const [toast, setToast] = useState(null)
+  const [form,      setForm]      = useState({ client: '', amount: '', notes: '' })
+  const [saving,    setSaving]    = useState(false)
+  const [toast,     setToast]     = useState(null)
 
   const statuses = ['All', 'Pending', 'Paid', 'Overdue']
 
+  // ── Fetch on mount ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    fetchInvoices()
+    fetchClients()
+  }, [])
+
+  async function fetchInvoices() {
+    setLoading(true)
+    try {
+      const res  = await invoicesAPI.list()
+      const data = Array.isArray(res.data) ? res.data : (res.data.invoices || [])
+      setInvoices(data)
+    } catch {
+      setInvoices([])
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function fetchClients() {
+    try {
+      const res  = await clientsAPI.list()
+      const data = Array.isArray(res.data) ? res.data : (res.data.clients || [])
+      setClients(data.map(c => c.name))
+    } catch {
+      setClients([])
+    }
+  }
+
+  // ── Helpers ─────────────────────────────────────────────────────────────────
   const filtered = filter === 'All' ? invoices : invoices.filter(i => i.status === filter)
 
   const totals = invoices.reduce((acc, inv) => {
-    acc.total += inv.amount
-    if (inv.status === 'Pending' || inv.status === 'Overdue') acc.outstanding += inv.amount
-    if (inv.status === 'Paid') acc.paid += inv.amount
+    acc.total += inv.amount || 0
+    if (inv.status === 'Pending' || inv.status === 'Overdue') acc.outstanding += inv.amount || 0
+    if (inv.status === 'Paid')  acc.paid += inv.amount || 0
     return acc
   }, { total: 0, outstanding: 0, paid: 0 })
 
@@ -44,33 +69,66 @@ export default function Invoices() {
     setTimeout(() => setToast(null), 3000)
   }
 
-  function handleCreate(e) {
+  // ── Create ──────────────────────────────────────────────────────────────────
+  async function handleCreate(e) {
     e.preventDefault()
     const amt = parseFloat(form.amount)
     if (!form.client || isNaN(amt)) return
-    const nextId = Math.max(...invoices.map(i => i.id)) + 1
-    const today = new Date()
-    const due = new Date(today)
-    due.setDate(due.getDate() + 14)
-    const fmt = d => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-    setInvoices(prev => [{
-      id: nextId,
-      client: form.client,
-      amount: amt,
-      status: 'Pending',
-      date: fmt(today),
-      due: fmt(due),
-    }, ...prev])
-    setForm({ client: '', amount: '', notes: '' })
-    setShowModal(false)
-    showToast(`Invoice #${nextId} created`)
+    setSaving(true)
+    try {
+      const today = new Date()
+      const due   = new Date(today); due.setDate(due.getDate() + 14)
+      const fmt   = d => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+      const payload = {
+        client: form.client,
+        amount: amt,
+        notes:  form.notes,
+        status: 'Pending',
+        date:   fmt(today),
+        due:    fmt(due),
+      }
+      const res     = await invoicesAPI.create(payload)
+      const created = res.data?.invoice || res.data || { ...payload, id: Date.now() }
+      setInvoices(prev => [created, ...prev])
+      setForm({ client: '', amount: '', notes: '' })
+      setShowModal(false)
+      showToast(`Invoice created`)
+    } catch (err) {
+      showToast(err?.response?.data?.detail || 'Failed to create invoice', 'error')
+    } finally {
+      setSaving(false)
+    }
   }
 
-  function markPaid(id) {
-    setInvoices(prev => prev.map(i => i.id === id ? { ...i, status: 'Paid' } : i))
-    showToast(`Invoice #${id} marked as paid`)
+  // ── Get Pay Link ─────────────────────────────────────────────────────────────
+  async function handlePayLink(inv) {
+    try {
+      const res = await invoicesAPI.getPayLink(inv.id)
+      const url = res.data?.url || res.data?.pay_link
+      if (url) window.open(url, '_blank')
+      else     showToast('No pay link returned', 'error')
+    } catch {
+      showToast('Failed to get pay link', 'error')
+    }
   }
 
+  // ── Send Reminder ────────────────────────────────────────────────────────────
+  async function handleRemind(inv) {
+    try {
+      await invoicesAPI.remind(inv.id)
+      showToast(`Reminder sent for Invoice #${inv.id}`)
+    } catch {
+      showToast('Failed to send reminder', 'error')
+    }
+  }
+
+  // ── Download PDF ─────────────────────────────────────────────────────────────
+  function handleDownloadPDF(inv) {
+    // Opens the PDF endpoint in a new tab; browser handles the download
+    window.open(`/api/invoices/${inv.id}/pdf`, '_blank')
+  }
+
+  // ── Render ──────────────────────────────────────────────────────────────────
   return (
     <Layout>
       <div className="section-header">
@@ -85,9 +143,9 @@ export default function Invoices() {
 
       <div className="stat-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)', marginBottom: 20 }}>
         {[
-          { label: 'Total Billed',   value: fmtMoney(totals.total) },
-          { label: 'Outstanding',    value: fmtMoney(totals.outstanding) },
-          { label: 'Collected',      value: fmtMoney(totals.paid) },
+          { label: 'Total Billed',  value: fmtMoney(totals.total) },
+          { label: 'Outstanding',   value: fmtMoney(totals.outstanding) },
+          { label: 'Collected',     value: fmtMoney(totals.paid) },
         ].map((s, i) => (
           <div className="stat-card" key={i}>
             <div className="stat-label">{s.label}</div>
@@ -121,7 +179,11 @@ export default function Invoices() {
           </div>
         </div>
 
-        {filtered.length === 0 ? (
+        {loading ? (
+          <div style={{ padding: '40px', textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 14 }}>
+            Loading invoices…
+          </div>
+        ) : filtered.length === 0 ? (
           <div className="empty-state">
             <div className="empty-icon">🧾</div>
             <h3>No invoices</h3>
@@ -144,18 +206,40 @@ export default function Invoices() {
               <tbody>
                 {filtered.map(inv => (
                   <tr key={inv.id}>
-                    <td className="text-muted text-sm font-mono" style={{ fontFamily: 'var(--font-mono)' }}>#{inv.id}</td>
+                    <td className="text-muted text-sm" style={{ fontFamily: 'var(--font-mono)' }}>
+                      #{inv.id}
+                    </td>
                     <td className="font-medium">{inv.client}</td>
                     <td className="font-semibold">{fmtMoney(inv.amount)}</td>
                     <td>{statusBadge(inv.status)}</td>
                     <td className="text-muted text-sm">{inv.date}</td>
                     <td className="text-muted text-sm">{inv.due}</td>
                     <td>
-                      {inv.status !== 'Paid' && (
-                        <button className="btn btn-ghost btn-sm" onClick={() => markPaid(inv.id)}>
-                          Mark Paid
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => handlePayLink(inv)}
+                          title="Get Pay Link"
+                        >
+                          Pay Link
                         </button>
-                      )}
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => handleDownloadPDF(inv)}
+                          title="Download PDF"
+                        >
+                          PDF
+                        </button>
+                        {inv.status !== 'Paid' && (
+                          <button
+                            className="btn btn-ghost btn-sm"
+                            onClick={() => handleRemind(inv)}
+                            title="Send Reminder"
+                          >
+                            Remind
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -165,6 +249,7 @@ export default function Invoices() {
         )}
       </div>
 
+      {/* Create Invoice Modal */}
       {showModal && (
         <div className="modal-overlay" onClick={() => setShowModal(false)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
@@ -182,7 +267,7 @@ export default function Invoices() {
                   required
                 >
                   <option value="">Select client…</option>
-                  {CLIENTS.map(c => <option key={c}>{c}</option>)}
+                  {clients.map(c => <option key={c}>{c}</option>)}
                 </select>
               </div>
               <div className="form-group">
@@ -210,7 +295,9 @@ export default function Invoices() {
               </div>
               <div className="modal-footer">
                 <button type="button" className="btn btn-ghost" onClick={() => setShowModal(false)}>Cancel</button>
-                <button type="submit" className="btn btn-primary">Create Invoice</button>
+                <button type="submit" className="btn btn-primary" disabled={saving}>
+                  {saving ? 'Creating…' : 'Create Invoice'}
+                </button>
               </div>
             </form>
           </div>

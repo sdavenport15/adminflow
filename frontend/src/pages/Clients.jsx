@@ -1,12 +1,7 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import Layout from '../components/Layout'
-
-const SEED_CLIENTS = [
-  { id: 1, name: 'Meridian Consulting',  contact: 'James Park',     email: 'james@meridian.co',    status: 'Active',   since: 'Jan 2025' },
-  { id: 2, name: 'Apex Partners',        contact: 'Rita Alvarez',   email: 'rita@apexpartners.io', status: 'Active',   since: 'Mar 2025' },
-  { id: 3, name: 'DataBridge LLC',       contact: 'Tom Weston',     email: 'tom@databridge.ai',    status: 'Inactive', since: 'Nov 2024' },
-  { id: 4, name: 'Sarah Chen',           contact: 'Sarah Chen',     email: 'sarah@chen.me',        status: 'Active',   since: 'Mar 2025' },
-]
+import { clientsAPI } from '../services/api'
+import api from '../services/api'
 
 function initials(name) {
   return name.split(' ').map(w => w[0]).slice(0, 2).join('').toUpperCase()
@@ -19,16 +14,37 @@ function statusBadge(status) {
 }
 
 export default function Clients() {
-  const [clients, setClients] = useState(SEED_CLIENTS)
-  const [search, setSearch] = useState('')
+  const [clients,   setClients]   = useState([])
+  const [loading,   setLoading]   = useState(true)
+  const [search,    setSearch]    = useState('')
   const [showModal, setShowModal] = useState(false)
-  const [form, setForm] = useState({ name: '', contact: '', email: '' })
-  const [toast, setToast] = useState(null)
+  const [form,      setForm]      = useState({ name: '', contact: '', email: '' })
+  const [saving,    setSaving]    = useState(false)
+  const [toast,     setToast]     = useState(null)
 
+  // ── Fetch on mount ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    fetchClients()
+  }, [])
+
+  async function fetchClients() {
+    setLoading(true)
+    try {
+      const res = await clientsAPI.list()
+      const data = Array.isArray(res.data) ? res.data : (res.data.clients || [])
+      setClients(data)
+    } catch {
+      setClients([])
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // ── Helpers ─────────────────────────────────────────────────────────────────
   const filtered = clients.filter(c =>
-    c.name.toLowerCase().includes(search.toLowerCase()) ||
-    c.contact.toLowerCase().includes(search.toLowerCase()) ||
-    c.email.toLowerCase().includes(search.toLowerCase())
+    (c.name  || '').toLowerCase().includes(search.toLowerCase()) ||
+    (c.contact || '').toLowerCase().includes(search.toLowerCase()) ||
+    (c.email || '').toLowerCase().includes(search.toLowerCase())
   )
 
   function showToast(msg, type = 'success') {
@@ -36,23 +52,54 @@ export default function Clients() {
     setTimeout(() => setToast(null), 3000)
   }
 
-  function handleCreate(e) {
+  // ── Create ──────────────────────────────────────────────────────────────────
+  async function handleCreate(e) {
     e.preventDefault()
     if (!form.name || !form.email) return
-    const newClient = {
-      id: Date.now(),
-      name: form.name,
-      contact: form.contact || form.name,
-      email: form.email,
-      status: 'Active',
-      since: new Date().toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
+    setSaving(true)
+    try {
+      const payload = {
+        name:    form.name,
+        contact: form.contact || form.name,
+        email:   form.email,
+        status:  'Active',
+      }
+      const res = await clientsAPI.create(payload)
+      const created = res.data?.client || res.data || { ...payload, id: Date.now() }
+      setClients(prev => [created, ...prev])
+      setForm({ name: '', contact: '', email: '' })
+      setShowModal(false)
+      showToast('Client added successfully')
+    } catch (err) {
+      showToast(err?.response?.data?.detail || 'Failed to add client', 'error')
+    } finally {
+      setSaving(false)
     }
-    setClients(prev => [newClient, ...prev])
-    setForm({ name: '', contact: '', email: '' })
-    setShowModal(false)
-    showToast('Client added successfully')
   }
 
+  // ── Delete ──────────────────────────────────────────────────────────────────
+  async function handleDelete(client) {
+    if (!window.confirm(`Delete "${client.name}"? This cannot be undone.`)) return
+    try {
+      await clientsAPI.delete(client.id)
+      setClients(prev => prev.filter(c => c.id !== client.id))
+      showToast('Client deleted')
+    } catch {
+      showToast('Failed to delete client', 'error')
+    }
+  }
+
+  // ── Onboard ─────────────────────────────────────────────────────────────────
+  async function handleOnboard(client) {
+    try {
+      await api.post(`/api/onboard/${client.id}`)
+      showToast(`Onboarding email sent to ${client.name}`)
+    } catch {
+      showToast('Failed to trigger onboarding', 'error')
+    }
+  }
+
+  // ── Render ──────────────────────────────────────────────────────────────────
   return (
     <Layout>
       <div className="section-header">
@@ -76,7 +123,11 @@ export default function Clients() {
           />
         </div>
 
-        {filtered.length === 0 ? (
+        {loading ? (
+          <div style={{ padding: '40px', textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 14 }}>
+            Loading clients…
+          </div>
+        ) : filtered.length === 0 ? (
           <div className="empty-state">
             <div className="empty-icon">👤</div>
             <h3>No clients found</h3>
@@ -106,15 +157,24 @@ export default function Clients() {
                     </td>
                     <td className="text-muted">{c.contact}</td>
                     <td className="text-muted">{c.email}</td>
-                    <td>{statusBadge(c.status)}</td>
-                    <td className="text-muted text-sm">{c.since}</td>
+                    <td>{statusBadge(c.status || 'Active')}</td>
+                    <td className="text-muted text-sm">{c.since || c.created_at || '—'}</td>
                     <td>
-                      <button
-                        className="btn btn-ghost btn-sm"
-                        onClick={() => showToast('Onboarding email triggered')}
-                      >
-                        Onboard
-                      </button>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => handleOnboard(c)}
+                        >
+                          Onboard
+                        </button>
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          style={{ color: 'var(--color-danger)' }}
+                          onClick={() => handleDelete(c)}
+                        >
+                          Delete
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -124,6 +184,7 @@ export default function Clients() {
         )}
       </div>
 
+      {/* Add Client Modal */}
       {showModal && (
         <div className="modal-overlay" onClick={() => setShowModal(false)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
@@ -164,7 +225,9 @@ export default function Clients() {
               </div>
               <div className="modal-footer">
                 <button type="button" className="btn btn-ghost" onClick={() => setShowModal(false)}>Cancel</button>
-                <button type="submit" className="btn btn-primary">Add Client</button>
+                <button type="submit" className="btn btn-primary" disabled={saving}>
+                  {saving ? 'Saving…' : 'Add Client'}
+                </button>
               </div>
             </form>
           </div>
