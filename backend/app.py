@@ -106,13 +106,11 @@ def _init_db():
                     )
                 """)
 
-                # Invoices
+                # Invoices — create new schema or migrate old schema
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS invoices (
                         id           SERIAL PRIMARY KEY,
-                        user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                         client_name  TEXT NOT NULL,
-                        client_email TEXT,
                         amount       REAL NOT NULL,
                         status       TEXT NOT NULL DEFAULT 'Pending',
                         notes        TEXT,
@@ -121,6 +119,14 @@ def _init_db():
                         created_at   TEXT NOT NULL
                     )
                 """)
+                # Migrate: add columns if they don't exist yet
+                for col_sql in [
+                    "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE",
+                    "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS client_email TEXT",
+                    # Rename legacy 'client' column to 'client_name' if still present
+                    "DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='invoices' AND column_name='client') THEN ALTER TABLE invoices RENAME COLUMN client TO client_name; END IF; END $$",
+                ]:
+                    cur.execute(col_sql)
 
                 # Appointments
                 cur.execute("""
