@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+.venv/
+*.db
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.env.local
+frontend/.env.production
+
+# OS
+.DS_Store
+*.log
+
+# Secrets
+google-service-account.json
