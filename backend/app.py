@@ -63,91 +63,98 @@ def _get_conn():
     return psycopg2.connect(DATABASE_URL)
 
 
+def _run_sql(sql: str, label: str = ""):
+    """Execute a single DDL statement in its own transaction, logging any error."""
+    try:
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+            conn.commit()
+    except Exception as exc:
+        logger.error("DB init step %r failed: %s", label, exc)
+
+
 def _init_db():
     if not DATABASE_URL:
         logger.warning("DATABASE_URL not set — database features will be unavailable.")
         return
-    try:
-        with _get_conn() as conn:
-            with conn.cursor() as cur:
-                # Beta signups (existing)
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS beta_signups (
-                        id        SERIAL PRIMARY KEY,
-                        name      TEXT NOT NULL,
-                        email     TEXT NOT NULL UNIQUE,
-                        signed_up TEXT NOT NULL
-                    )
-                """)
 
-                # Users
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS users (
-                        id              SERIAL PRIMARY KEY,
-                        name            TEXT NOT NULL,
-                        email           TEXT NOT NULL UNIQUE,
-                        hashed_password TEXT NOT NULL,
-                        plan            TEXT NOT NULL DEFAULT 'free',
-                        created_at      TEXT NOT NULL
-                    )
-                """)
+    _run_sql("""
+        CREATE TABLE IF NOT EXISTS beta_signups (
+            id        SERIAL PRIMARY KEY,
+            name      TEXT NOT NULL,
+            email     TEXT NOT NULL UNIQUE,
+            signed_up TEXT NOT NULL
+        )
+    """, "beta_signups")
 
-                # Clients
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS clients (
-                        id         SERIAL PRIMARY KEY,
-                        user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                        name       TEXT NOT NULL,
-                        contact    TEXT,
-                        email      TEXT,
-                        status     TEXT NOT NULL DEFAULT 'Active',
-                        notes      TEXT,
-                        created_at TEXT NOT NULL
-                    )
-                """)
+    _run_sql("""
+        CREATE TABLE IF NOT EXISTS users (
+            id              SERIAL PRIMARY KEY,
+            name            TEXT NOT NULL,
+            email           TEXT NOT NULL UNIQUE,
+            hashed_password TEXT NOT NULL,
+            plan            TEXT NOT NULL DEFAULT 'free',
+            created_at      TEXT NOT NULL
+        )
+    """, "users")
 
-                # Invoices — create new schema or migrate old schema
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS invoices (
-                        id           SERIAL PRIMARY KEY,
-                        client_name  TEXT NOT NULL,
-                        amount       REAL NOT NULL,
-                        status       TEXT NOT NULL DEFAULT 'Pending',
-                        notes        TEXT,
-                        due_date     TEXT,
-                        payment_url  TEXT,
-                        created_at   TEXT NOT NULL
-                    )
-                """)
-                # Migrate: add columns if they don't exist yet
-                for col_sql in [
-                    "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE",
-                    "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS client_email TEXT",
-                    # Rename legacy 'client' column to 'client_name' if still present
-                    "DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='invoices' AND column_name='client') THEN ALTER TABLE invoices RENAME COLUMN client TO client_name; END IF; END $$",
-                ]:
-                    cur.execute(col_sql)
+    _run_sql("""
+        CREATE TABLE IF NOT EXISTS clients (
+            id         SERIAL PRIMARY KEY,
+            user_id    INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            name       TEXT NOT NULL,
+            contact    TEXT,
+            email      TEXT,
+            status     TEXT NOT NULL DEFAULT 'Active',
+            notes      TEXT,
+            created_at TEXT NOT NULL
+        )
+    """, "clients")
 
-                # Appointments
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS appointments (
-                        id         SERIAL PRIMARY KEY,
-                        user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                        title      TEXT NOT NULL,
-                        client     TEXT,
-                        day        INTEGER,
-                        hour       INTEGER,
-                        created_at TEXT NOT NULL
-                    )
-                """)
+    # Invoices: create base table without user_id so it works for both new and migrated DBs
+    _run_sql("""
+        CREATE TABLE IF NOT EXISTS invoices (
+            id           SERIAL PRIMARY KEY,
+            client_name  TEXT,
+            amount       REAL NOT NULL,
+            status       TEXT NOT NULL DEFAULT 'Pending',
+            notes        TEXT,
+            due_date     TEXT,
+            payment_url  TEXT,
+            created_at   TEXT NOT NULL
+        )
+    """, "invoices")
 
-            conn.commit()
+    # Migrate invoices: rename legacy 'client' column → 'client_name'
+    _run_sql("""
+        DO $$ BEGIN
+          IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name='invoices' AND column_name='client'
+          ) THEN
+            ALTER TABLE invoices RENAME COLUMN client TO client_name;
+          END IF;
+        END $$
+    """, "invoices.rename_client")
 
-        # Seed demo account if it doesn't already exist
-        _seed_demo_user()
+    _run_sql("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE", "invoices.user_id")
+    _run_sql("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS client_email TEXT", "invoices.client_email")
 
-    except Exception as exc:
-        logger.error("DB init failed: %s", exc)
+    _run_sql("""
+        CREATE TABLE IF NOT EXISTS appointments (
+            id         SERIAL PRIMARY KEY,
+            user_id    INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            title      TEXT NOT NULL,
+            client     TEXT,
+            day        INTEGER,
+            hour       INTEGER,
+            created_at TEXT NOT NULL
+        )
+    """, "appointments")
+
+    # Seed demo account if it doesn't already exist
+    _seed_demo_user()
 
 
 def _seed_demo_user():
