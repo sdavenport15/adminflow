@@ -50,6 +50,14 @@ export const scheduleAPI = {
   delete: (id)   => api.delete(`/api/schedule/${id}`),
 }
 
+// ── Google Calendar ───────────────────────────────────────────────────────────
+export const gcalAPI = {
+  status:     ()    => api.get('/api/google-calendar/status'),
+  disconnect: ()    => api.delete('/api/google-calendar/disconnect'),
+  sync:       (id)  => api.post(`/api/google-calendar/sync/${id}`),
+  events:     ()    => api.get('/api/google-calendar/events'),
+}
+
 // ── Beta signup (landing page) ────────────────────────────────────────────────
 export const betaApi = {
   signup: (data) => api.post('/api/beta-signup', data),

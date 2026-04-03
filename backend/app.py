@@ -26,6 +26,13 @@ from email_service import (
     send_onboarding_email,
     send_invoice_reminder,
 )
+from google_calendar_service import (
+    get_auth_url,
+    exchange_code,
+    push_appointment,
+    delete_appointment,
+    list_upcoming_events,
+)
 
 logger = logging.getLogger("adminflow")
 
@@ -141,17 +148,24 @@ def _init_db():
     _run_sql("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE", "invoices.user_id")
     _run_sql("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS client_email TEXT", "invoices.client_email")
 
+    # Google Calendar token columns on users
+    _run_sql("ALTER TABLE users ADD COLUMN IF NOT EXISTS gcal_access_token TEXT", "users.gcal_access_token")
+    _run_sql("ALTER TABLE users ADD COLUMN IF NOT EXISTS gcal_refresh_token TEXT", "users.gcal_refresh_token")
+    _run_sql("ALTER TABLE users ADD COLUMN IF NOT EXISTS gcal_token_expiry TEXT", "users.gcal_token_expiry")
+
     _run_sql("""
         CREATE TABLE IF NOT EXISTS appointments (
-            id         SERIAL PRIMARY KEY,
-            user_id    INTEGER REFERENCES users(id) ON DELETE CASCADE,
-            title      TEXT NOT NULL,
-            client     TEXT,
-            day        INTEGER,
-            hour       INTEGER,
-            created_at TEXT NOT NULL
+            id             SERIAL PRIMARY KEY,
+            user_id        INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            title          TEXT NOT NULL,
+            client         TEXT,
+            day            INTEGER,
+            hour           INTEGER,
+            google_event_id TEXT,
+            created_at     TEXT NOT NULL
         )
     """, "appointments")
+    _run_sql("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS google_event_id TEXT", "appointments.google_event_id")
 
     # Seed demo account if it doesn't already exist
     _seed_demo_user()
@@ -903,6 +917,133 @@ def list_beta_signups(x_api_key: Optional[str] = Header(None)):
 
 # ── Static frontend (production) ──────────────────────────────────────────────
 # In production the Dockerfile runs `npm run build` and places dist/ next to
+# ── Google Calendar endpoints ─────────────────────────────────────────────────
+
+@app.get("/api/google-calendar/auth")
+def gcal_auth(current_user: dict = Depends(get_current_user)):
+    """Redirect the user to Google's OAuth consent screen."""
+    state = str(current_user["id"])
+    auth_url = get_auth_url(state=state)
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=auth_url)
+
+
+@app.get("/api/google-calendar/callback", include_in_schema=False)
+def gcal_callback(code: str, state: str):
+    """Handle Google OAuth callback, store tokens, redirect to schedule page."""
+    from fastapi.responses import RedirectResponse
+    APP_URL_local = os.getenv("APP_URL", "https://adminflow-production.up.railway.app")
+    try:
+        tokens = exchange_code(code)
+        user_id = int(state)
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE users
+                    SET gcal_access_token=%s, gcal_refresh_token=%s, gcal_token_expiry=%s
+                    WHERE id=%s
+                    """,
+                    (tokens["access_token"], tokens["refresh_token"], tokens["token_expiry"], user_id),
+                )
+            conn.commit()
+        return RedirectResponse(url=f"{APP_URL_local}/schedule?gcal=connected")
+    except Exception as exc:
+        logger.error("gcal_callback error: %s", exc)
+        return RedirectResponse(url=f"{APP_URL_local}/schedule?gcal=error")
+
+
+@app.get("/api/google-calendar/status")
+def gcal_status(current_user: dict = Depends(get_current_user)):
+    """Return whether the current user has connected Google Calendar."""
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT gcal_access_token FROM users WHERE id=%s", (current_user["id"],))
+            row = cur.fetchone()
+    connected = bool(row and row.get("gcal_access_token"))
+    return {"connected": connected}
+
+
+@app.delete("/api/google-calendar/disconnect")
+def gcal_disconnect(current_user: dict = Depends(get_current_user)):
+    """Revoke Google Calendar connection."""
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE users SET gcal_access_token=NULL, gcal_refresh_token=NULL, gcal_token_expiry=NULL WHERE id=%s",
+                (current_user["id"],),
+            )
+        conn.commit()
+    return {"disconnected": True}
+
+
+@app.get("/api/google-calendar/events")
+def gcal_events(current_user: dict = Depends(get_current_user)):
+    """Fetch upcoming events from the user's Google Calendar."""
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT gcal_access_token, gcal_refresh_token, gcal_token_expiry FROM users WHERE id=%s",
+                (current_user["id"],),
+            )
+            row = cur.fetchone()
+    if not row or not row.get("gcal_access_token"):
+        raise HTTPException(status_code=400, detail="Google Calendar not connected")
+    try:
+        events = list_upcoming_events(
+            row["gcal_access_token"], row["gcal_refresh_token"], row["gcal_token_expiry"]
+        )
+        return {"events": events}
+    except Exception as exc:
+        logger.error("gcal_events error: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to fetch Google Calendar events")
+
+
+@app.post("/api/google-calendar/sync/{appointment_id}")
+def gcal_sync_appointment(appointment_id: int, current_user: dict = Depends(get_current_user)):
+    """Push a single appointment to Google Calendar."""
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM appointments WHERE id=%s AND user_id=%s",
+                (appointment_id, current_user["id"]),
+            )
+            appt = cur.fetchone()
+            cur.execute(
+                "SELECT gcal_access_token, gcal_refresh_token, gcal_token_expiry FROM users WHERE id=%s",
+                (current_user["id"],),
+            )
+            user_tokens = cur.fetchone()
+
+    if not appt:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    if not user_tokens or not user_tokens.get("gcal_access_token"):
+        raise HTTPException(status_code=400, detail="Google Calendar not connected")
+
+    try:
+        event_id, updated = push_appointment(
+            user_tokens["gcal_access_token"],
+            user_tokens["gcal_refresh_token"],
+            user_tokens["gcal_token_expiry"],
+            dict(appt),
+        )
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE appointments SET google_event_id=%s WHERE id=%s",
+                    (event_id, appointment_id),
+                )
+                cur.execute(
+                    "UPDATE users SET gcal_access_token=%s, gcal_refresh_token=%s, gcal_token_expiry=%s WHERE id=%s",
+                    (updated["access_token"], updated["refresh_token"], updated["token_expiry"], current_user["id"]),
+                )
+            conn.commit()
+        return {"synced": True, "google_event_id": event_id}
+    except Exception as exc:
+        logger.error("gcal_sync error: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to sync with Google Calendar")
+
+
 # this file. The block below serves the SPA; comment it out for local dev.
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")

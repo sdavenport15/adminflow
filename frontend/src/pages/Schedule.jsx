@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import Layout from '../components/Layout'
-import { scheduleAPI, clientsAPI } from '../services/api'
+import { scheduleAPI, clientsAPI, gcalAPI } from '../services/api'
 
 const HOURS     = Array.from({ length: 11 }, (_, i) => i + 8) // 8am–6pm
 const DAYS      = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']
@@ -14,14 +15,26 @@ export default function Schedule() {
   const [form,      setForm]      = useState({ title: '', client: '', day: 1, hour: 9 })
   const [saving,    setSaving]    = useState(false)
   const [toast,     setToast]     = useState(null)
-  const [gcalConnected, setGcalConnected] = useState(
-    localStorage.getItem('gcal_connected') === 'true'
-  )
+  const [gcalConnected, setGcalConnected] = useState(false)
+  const [syncing, setSyncing] = useState({})
+  const [searchParams, setSearchParams] = useSearchParams()
 
   // ── Fetch on mount ──────────────────────────────────────────────────────────
   useEffect(() => {
     fetchEvents()
     fetchClients()
+    fetchGcalStatus()
+
+    // Handle redirect back from Google OAuth
+    const gcalParam = searchParams.get('gcal')
+    if (gcalParam === 'connected') {
+      showToast('Google Calendar connected!')
+      setGcalConnected(true)
+      setSearchParams({})
+    } else if (gcalParam === 'error') {
+      showToast('Google Calendar connection failed. Try again.')
+      setSearchParams({})
+    }
   }, [])
 
   async function fetchEvents() {
@@ -87,11 +100,41 @@ export default function Schedule() {
     }
   }
 
+  async function fetchGcalStatus() {
+    try {
+      const res = await gcalAPI.status()
+      setGcalConnected(res.data?.connected === true)
+    } catch {
+      setGcalConnected(false)
+    }
+  }
+
   // ── Google Calendar connect ──────────────────────────────────────────────────
   function handleGcalConnect() {
-    // Redirects the user to the backend OAuth start URL.
-    // The backend will redirect back with gcal_connected=true in the callback.
     window.location.href = '/api/google-calendar/auth'
+  }
+
+  async function handleGcalDisconnect() {
+    try {
+      await gcalAPI.disconnect()
+      setGcalConnected(false)
+      showToast('Google Calendar disconnected')
+    } catch {
+      showToast('Failed to disconnect')
+    }
+  }
+
+  async function handleSyncToGcal(ev) {
+    if (!gcalConnected) { showToast('Connect Google Calendar first'); return }
+    setSyncing(prev => ({ ...prev, [ev.id]: true }))
+    try {
+      await gcalAPI.sync(ev.id)
+      showToast('Synced to Google Calendar!')
+    } catch {
+      showToast('Sync failed — try again')
+    } finally {
+      setSyncing(prev => ({ ...prev, [ev.id]: false }))
+    }
   }
 
   // ── Render ──────────────────────────────────────────────────────────────────
@@ -118,6 +161,10 @@ export default function Schedule() {
               color: '#10b981',
             }}>
               <span style={{ fontSize: 15 }}>✓</span> Google Calendar Connected
+              <button
+                onClick={handleGcalDisconnect}
+                style={{ marginLeft: 8, background: 'none', border: 'none', cursor: 'pointer', fontSize: 11, color: '#10b981', textDecoration: 'underline' }}
+              >Disconnect</button>
             </div>
           ) : (
             <button
@@ -199,6 +246,19 @@ export default function Schedule() {
                             >
                               <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-primary)', lineHeight: 1.3, paddingRight: 16 }}>{ev.title}</div>
                               <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 1 }}>{ev.client}</div>
+                              {gcalConnected && !ev.google_event_id && (
+                                <button
+                                  onClick={() => handleSyncToGcal(ev)}
+                                  disabled={syncing[ev.id]}
+                                  style={{ fontSize: 10, marginTop: 3, background: 'none', border: '1px solid rgba(99,102,241,0.4)', borderRadius: 3, padding: '1px 5px', cursor: 'pointer', color: 'var(--color-primary)' }}
+                                  title="Add to Google Calendar"
+                                >
+                                  {syncing[ev.id] ? '…' : '+ GCal'}
+                                </button>
+                              )}
+                              {ev.google_event_id && (
+                                <div style={{ fontSize: 10, marginTop: 3, color: '#10b981' }}>✓ In GCal</div>
+                              )}
                               <button
                                 onClick={() => handleDelete(ev)}
                                 style={{
